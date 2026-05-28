@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v PicoScenes >/dev/null 2>&1; then
+  shopt -s nullglob
+  debs=(/picoscenes-installer/*.deb)
+  shopt -u nullglob
+
+  if [ "${#debs[@]}" -gt 0 ]; then
+    echo "[entrypoint] Installing PicoScenes package(s): ${debs[*]}"
+    apt-get update
+    apt-get install -y --no-install-recommends "${debs[@]}"
+    rm -rf /var/lib/apt/lists/*
+  fi
+fi
+
+if [ "${RUN_PICOSCENES}" = "true" ] && ! command -v PicoScenes >/dev/null 2>&1; then
+  cat >&2 <<'MSG'
+[entrypoint] PicoScenes command was requested but PicoScenes is not installed.
+
+Put the PicoScenes Linux .deb package in ./picoscenes-installer on the GMKtec
+host, then rebuild/restart:
+
+  docker compose -f docker-compose.gmktec.yml up --build
+
+For preprocessing existing .csi files without launching PicoScenes, set:
+
+  RUN_PICOSCENES=false
+MSG
+  exit 127
+fi
+
+args=(
+  --watch-dir "${WATCH_DIR}"
+  --pattern "${PATTERN}"
+  --api-url "${API_URL}"
+  --sampling-rate "${SAMPLING_RATE}"
+  --baseline-seconds "${BASELINE_SECONDS}"
+  --smooth-seconds "${SMOOTH_SECONDS}"
+  --max-tones "${MAX_TONES}"
+  --chunk-mb "${CHUNK_MB}"
+  --batch-size "${BATCH_SIZE}"
+  --stable-seconds "${STABLE_SECONDS}"
+  --poll-interval "${POLL_INTERVAL}"
+)
+
+if [ "${RUN_PICOSCENES}" = "true" ]; then
+  args+=(--picoscenes-command "${PICOSCENES_COMMAND}")
+fi
+
+if [ "${DRY_RUN}" = "true" ]; then
+  args+=(--dry-run)
+fi
+
+if [ "${PROCESS_ONCE}" = "true" ]; then
+  args+=(--once)
+fi
+
+echo "[entrypoint] Starting GMKtec CSI agent"
+exec python /app/gmktec_csi_agent.py "${args[@]}"

@@ -1,0 +1,29 @@
+services:
+  gmktec-csi-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.gmktec
+    container_name: gmktec-csi-agent
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    environment:
+      API_URL: ${API_URL:-http://127.0.0.1:8001/csi/features}
+      WATCH_DIR: /data/csi
+      PATTERN: ${PATTERN:-*.csi}
+      SAMPLING_RATE: ${SAMPLING_RATE:-100.0}
+      BASELINE_SECONDS: ${BASELINE_SECONDS:-5.0}
+      SMOOTH_SECONDS: ${SMOOTH_SECONDS:-0.5}
+      MAX_TONES: ${MAX_TONES:-256}
+      CHUNK_MB: ${CHUNK_MB:-32}
+      BATCH_SIZE: ${BATCH_SIZE:-500}
+      STABLE_SECONDS: ${STABLE_SECONDS:-2.0}
+      POLL_INTERVAL: ${POLL_INTERVAL:-1.0}
+      RUN_PICOSCENES: ${RUN_PICOSCENES:-true}
+      PICOSCENES_COMMAND: ${PICOSCENES_COMMAND:-PicoScenes "-d debug -i 2 --mode logger --plot"}
+      DRY_RUN: ${DRY_RUN:-false}
+      PROCESS_ONCE: ${PROCESS_ONCE:-false}
+    volumes:
+      - ./data/csi:/data/csi
+      - ./picoscenes-installer:/picoscenes-installer:ro
+      - /dev:/dev

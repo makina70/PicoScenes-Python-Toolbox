@@ -1,0 +1,43 @@
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    WATCH_DIR=/data/csi \
+    PATTERN=*.csi \
+    API_URL=http://127.0.0.1:8001/csi/features \
+    SAMPLING_RATE=100.0 \
+    BASELINE_SECONDS=5.0 \
+    SMOOTH_SECONDS=0.5 \
+    MAX_TONES=256 \
+    CHUNK_MB=32 \
+    BATCH_SIZE=500 \
+    STABLE_SECONDS=2.0 \
+    POLL_INTERVAL=1.0 \
+    RUN_PICOSCENES=false \
+    PICOSCENES_COMMAND='PicoScenes "-d debug -i 2 --mode logger --plot"' \
+    DRY_RUN=false \
+    PROCESS_ONCE=false
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        git \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml setup.py picoscenes.pyx README.md LICENSE.md ./
+COPY rxs_parsing_core ./rxs_parsing_core
+COPY gmktec_csi_agent.py ./gmktec_csi_agent.py
+COPY scripts/gmktec-entrypoint.sh /usr/local/bin/gmktec-entrypoint
+
+RUN chmod +x /usr/local/bin/gmktec-entrypoint \
+    && python -m pip install --upgrade pip setuptools wheel Cython numpy \
+    && python -m pip install .
+
+VOLUME ["/data/csi", "/picoscenes-installer"]
+
+ENTRYPOINT ["/usr/local/bin/gmktec-entrypoint"]
