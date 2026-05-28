@@ -143,7 +143,48 @@ Example payload shape:
 | `MAX_TONES` | `256` | Maximum subcarriers kept after downsampling |
 | `CHUNK_MB` | `32` | Chunk size for parsing large `.csi` files |
 | `BATCH_SIZE` | `500` | Samples per API POST |
+| `FOLLOW_GROWING_FILES` | `true` | Process a growing `.csi` file instead of waiting for completion |
+| `FOLLOW_LAG_BYTES` | `1048576` | Read this many bytes behind the file end to avoid partial frames |
+| `STREAM_POST_INTERVAL` | `1.0` | Flush streaming feature batches at least this often |
 | `DRY_RUN` | `false` | Print batches without POSTing |
+
+## Real-Time Mode
+
+The default container mode is now real-time oriented:
+
+```text
+FOLLOW_GROWING_FILES=true
+```
+
+In this mode the agent does not wait for PicoScenes to finish writing the file.
+It tails the growing `.csi` file, stays about `FOLLOW_LAG_BYTES` behind the file
+end to avoid incomplete frames, extracts features, and posts batches while the
+recording is still running.
+
+Recommended GMKtec command when PicoScenes runs on the host:
+
+```bash
+RUN_PICOSCENES=false \
+FOLLOW_GROWING_FILES=true \
+API_URL=http://<ML_API_HOST>:8001/csi/features \
+docker compose -f docker-compose.gmktec.yml up -d --build
+```
+
+Then run PicoScenes from the watched directory:
+
+```bash
+cd data/csi
+PicoScenes "-d debug -i 2 --mode logger --plot"
+```
+
+The first `BASELINE_SECONDS` seconds are used to learn the empty-room baseline.
+During that warm-up period, no feature batches are posted.  After the baseline
+is ready, logs should include:
+
+```text
+[agent] streaming baseline ready rows=500 threshold=...
+[agent] posted batch start=...
+```
 
 ## Notes
 

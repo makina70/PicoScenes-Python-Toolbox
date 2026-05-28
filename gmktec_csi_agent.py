@@ -47,6 +47,36 @@ def reshape_csi(data: np.ndarray, num_tones: int, num_tx: int, num_rx: int) -> n
     return data.reshape((num_tones, num_tx, num_rx), order="F")
 
 
+def frame_to_csi_tensor(frame: dict) -> tuple[np.ndarray, dict] | None:
+    if "CSI" not in frame:
+        return None
+
+    csi = frame["CSI"]
+    if "CSI" in csi:
+        data = np.asarray(csi["CSI"], dtype=np.complex64).ravel()
+    elif "Real" in csi and "Imag" in csi:
+        data = np.asarray(csi["Real"], dtype=np.float32) + 1j * np.asarray(
+            csi["Imag"], dtype=np.float32
+        )
+        data = data.astype(np.complex64).ravel()
+    else:
+        return None
+
+    num_tones = int(csi["numTones"])
+    num_tx, num_rx = get_link_counts(csi)
+    tensor = reshape_csi(data, num_tones, num_tx, num_rx)
+    if tensor is None:
+        return None
+
+    metadata = {
+        "numTones": num_tones,
+        "numTx": num_tx,
+        "numRx": num_rx,
+        "subcarrierIndex": list(csi.get("SubcarrierIndex", [])),
+    }
+    return tensor, metadata
+
+
 def choose_subcarrier_stride(num_tones: int, max_tones: int) -> int:
     return max(1, int(np.ceil(num_tones / max_tones)))
 
@@ -146,6 +176,10 @@ def clean_phase_per_link(csi_tensor: np.ndarray) -> np.ndarray:
     return cleaned.reshape(phase.shape)
 
 
+def clean_phase_frame(csi_frame: np.ndarray) -> np.ndarray:
+    return clean_phase_per_link(csi_frame[np.newaxis, ...])[0]
+
+
 def robust_zscore_by_baseline(matrix: np.ndarray, baseline_rows: int, eps: float = 1e-9) -> np.ndarray:
     baseline = matrix[:baseline_rows]
     center = np.median(baseline, axis=0, keepdims=True)
@@ -236,6 +270,162 @@ def extract_features(
     return features, metadata
 
 
+class StreamingFeatureExtractor:
+    def __init__(
+        self,
+        sampling_rate_hz: float,
+        baseline_seconds: float,
+        smooth_seconds: float,
+        max_tones: int,
+    ) -> None:
+        self.sampling_rate_hz = sampling_rate_hz
+        self.baseline_rows = max(20, int(round(baseline_seconds * sampling_rate_hz)))
+        self.smooth_window = max(1, int(round(smooth_seconds * sampling_rate_hz)))
+        self.max_tones = max_tones
+
+        self.metadata: dict | None = None
+        self.selected_indices: np.ndarray | None = None
+        self.previous_phase: np.ndarray | None = None
+        self.previous_motion_scores: list[float] = []
+        self.sample_index = 0
+
+        self.baseline_phase_diffs: list[np.ndarray] = []
+        self.baseline_amplitudes: list[np.ndarray] = []
+        self.phase_center: np.ndarray | None = None
+        self.phase_scale: np.ndarray | None = None
+        self.amplitude_baseline: np.ndarray | None = None
+        self.amplitude_center: np.ndarray | None = None
+        self.amplitude_scale: np.ndarray | None = None
+        self.motion_threshold: float | None = None
+
+    def _initialize_metadata(self, frame_metadata: dict) -> None:
+        original_num_tones = int(frame_metadata["numTones"])
+        stride = choose_subcarrier_stride(original_num_tones, self.max_tones)
+        self.selected_indices = np.arange(0, original_num_tones, stride)
+
+        full_subcarrier_index = frame_metadata.get("subcarrierIndex", [])
+        if full_subcarrier_index:
+            subcarrier_index = [full_subcarrier_index[i] for i in self.selected_indices]
+        else:
+            subcarrier_index = self.selected_indices.tolist()
+
+        self.metadata = {
+            "numTones": int(len(self.selected_indices)),
+            "originalNumTones": original_num_tones,
+            "subcarrierStride": stride,
+            "numTx": int(frame_metadata["numTx"]),
+            "numRx": int(frame_metadata["numRx"]),
+            "subcarrierIndex": subcarrier_index,
+            "streaming": True,
+        }
+
+    def _finalize_baseline(self) -> None:
+        phase_baseline = np.asarray(self.baseline_phase_diffs, dtype=np.float32)
+        amplitude_baseline_frames = np.asarray(self.baseline_amplitudes, dtype=np.float32)
+        self.amplitude_baseline = np.median(amplitude_baseline_frames, axis=0, keepdims=True)
+
+        amplitude_delta_baseline = amplitude_baseline_frames[1:] - self.amplitude_baseline
+        amplitude_delta_flat = amplitude_delta_baseline.reshape((amplitude_delta_baseline.shape[0], -1))
+
+        self.phase_center = np.median(phase_baseline, axis=0, keepdims=True)
+        self.phase_scale = (
+            1.4826 * np.median(np.abs(phase_baseline - self.phase_center), axis=0, keepdims=True)
+            + 1e-9
+        )
+        self.amplitude_center = np.median(amplitude_delta_flat, axis=0, keepdims=True)
+        self.amplitude_scale = (
+            1.4826
+            * np.median(np.abs(amplitude_delta_flat - self.amplitude_center), axis=0, keepdims=True)
+            + 1e-9
+        )
+
+        phase_z = (phase_baseline - self.phase_center) / self.phase_scale
+        amplitude_z = (amplitude_delta_flat - self.amplitude_center) / self.amplitude_scale
+        phase_energy = np.sqrt(np.mean(phase_z**2, axis=1))
+        amplitude_energy = np.sqrt(np.mean(amplitude_z**2, axis=1))
+        baseline_scores = np.sqrt(phase_energy**2 + amplitude_energy**2)
+        center = float(np.median(baseline_scores))
+        mad = float(np.median(np.abs(baseline_scores - center)))
+        self.motion_threshold = center + 4.0 * 1.4826 * mad
+
+    def add_frame(self, csi_frame: np.ndarray, frame_metadata: dict) -> tuple[int, np.ndarray] | None:
+        if self.metadata is None:
+            self._initialize_metadata(frame_metadata)
+
+        if self.selected_indices is None or self.metadata is None:
+            return None
+
+        if (int(frame_metadata["numTx"]), int(frame_metadata["numRx"])) != (
+            self.metadata["numTx"],
+            self.metadata["numRx"],
+        ):
+            return None
+        if int(frame_metadata["numTones"]) < self.metadata["originalNumTones"]:
+            return None
+
+        frame = csi_frame[self.selected_indices, :, :]
+        phase = clean_phase_frame(frame)
+        amplitude = np.log(np.abs(frame) + 1e-9).astype(np.float32)
+
+        self.baseline_amplitudes.append(amplitude)
+        if len(self.baseline_amplitudes) > self.baseline_rows + 1:
+            self.baseline_amplitudes = self.baseline_amplitudes[-(self.baseline_rows + 1) :]
+
+        if self.previous_phase is None:
+            self.previous_phase = phase
+            return None
+
+        phase_diff = (phase - self.previous_phase).reshape(1, -1).astype(np.float32)
+        self.previous_phase = phase
+
+        if self.motion_threshold is None:
+            self.baseline_phase_diffs.append(phase_diff.ravel())
+            if len(self.baseline_phase_diffs) >= self.baseline_rows:
+                self._finalize_baseline()
+                print(
+                    "[agent] streaming baseline ready "
+                    f"rows={self.baseline_rows} threshold={self.motion_threshold:.3f}"
+                )
+            return None
+
+        assert self.phase_center is not None
+        assert self.phase_scale is not None
+        assert self.amplitude_baseline is not None
+        assert self.amplitude_center is not None
+        assert self.amplitude_scale is not None
+        assert self.motion_threshold is not None
+
+        amplitude_delta = (amplitude - self.amplitude_baseline[0]).reshape(1, -1)
+        phase_z = (phase_diff - self.phase_center) / self.phase_scale
+        amplitude_z = (amplitude_delta - self.amplitude_center) / self.amplitude_scale
+
+        phase_energy = float(np.sqrt(np.mean(phase_z**2)))
+        amplitude_energy = float(np.sqrt(np.mean(amplitude_z**2)))
+        pc1_phase_diff = float(np.mean(phase_z))
+        raw_motion_score = float(np.sqrt(phase_energy**2 + amplitude_energy**2))
+
+        self.previous_motion_scores.append(raw_motion_score)
+        if len(self.previous_motion_scores) > self.smooth_window:
+            self.previous_motion_scores = self.previous_motion_scores[-self.smooth_window :]
+        motion_score = float(np.mean(self.previous_motion_scores))
+        active_flag = 1.0 if motion_score > self.motion_threshold else 0.0
+
+        feature = np.asarray(
+            [
+                motion_score,
+                self.motion_threshold,
+                active_flag,
+                pc1_phase_diff,
+                phase_energy,
+                amplitude_energy,
+            ],
+            dtype=np.float32,
+        )
+        index = self.sample_index
+        self.sample_index += 1
+        return index, feature
+
+
 def post_json(url: str, payload: dict, timeout: float) -> dict:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
@@ -273,6 +463,56 @@ def feature_batches(
             .tolist()
         )
         yield start, payload_features
+
+
+def features_to_payload(
+    indexed_features: list[tuple[int, np.ndarray]],
+    sampling_rate_hz: float,
+) -> tuple[int, dict]:
+    columns = [
+        "motionScore",
+        "motionThreshold",
+        "activeFlag",
+        "pc1PhaseDiff",
+        "phaseDiffEnergy",
+        "amplitudeDeltaEnergy",
+    ]
+    start = indexed_features[0][0]
+    indices = np.asarray([item[0] for item in indexed_features], dtype=np.float64)
+    batch = np.asarray([item[1] for item in indexed_features], dtype=np.float32)
+    payload_features = {
+        name: batch[:, index].astype(float).tolist() for index, name in enumerate(columns)
+    }
+    payload_features["timeSeconds"] = (indices / sampling_rate_hz).astype(float).tolist()
+    return start, payload_features
+
+
+def send_feature_payload(
+    args: argparse.Namespace,
+    base_payload: dict,
+    batch_start: int,
+    batch_features: dict,
+) -> None:
+    payload = {
+        **base_payload,
+        "batchStart": batch_start,
+        "features": batch_features,
+    }
+    if args.dry_run:
+        print(
+            "[agent] dry-run batch "
+            f"start={batch_start} samples={len(batch_features['motionScore'])} "
+            f"latestMotionScore={batch_features['motionScore'][-1]:.3f}"
+        )
+        return
+
+    try:
+        result = post_json(args.api_url, payload, timeout=args.timeout)
+        print(f"[agent] posted batch start={batch_start} result={result}")
+    except (HTTPError, URLError, TimeoutError) as exc:
+        print(f"[agent] POST failed start={batch_start}: {exc}")
+        if args.stop_on_error:
+            raise
 
 
 def wait_until_file_stable(path: Path, stable_seconds: float, poll_interval: float) -> bool:
@@ -325,26 +565,92 @@ def process_file(path: Path, args: argparse.Namespace, session_id: str) -> None:
     )
 
     for start, batch_features in feature_batches(features, args.sampling_rate, args.batch_size):
-        payload = {
-            **base_payload,
-            "batchStart": start,
-            "features": batch_features,
-        }
-        if args.dry_run:
-            print(
-                "[agent] dry-run batch "
-                f"start={start} samples={len(batch_features['motionScore'])} "
-                f"latestMotionScore={batch_features['motionScore'][-1]:.3f}"
-            )
-            continue
+        send_feature_payload(args, base_payload, start, batch_features)
 
-        try:
-            result = post_json(args.api_url, payload, timeout=args.timeout)
-            print(f"[agent] posted batch start={start} result={result}")
-        except (HTTPError, URLError, TimeoutError) as exc:
-            print(f"[agent] POST failed start={start}: {exc}")
-            if args.stop_on_error:
-                raise
+
+def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -> None:
+    print(f"[agent] following growing file {path}")
+    extractor = StreamingFeatureExtractor(
+        sampling_rate_hz=args.sampling_rate,
+        baseline_seconds=args.baseline_seconds,
+        smooth_seconds=args.smooth_seconds,
+        max_tones=args.max_tones,
+    )
+    pos = 0
+    pending: list[tuple[int, np.ndarray]] = []
+    last_post = time.monotonic()
+    base_payload: dict | None = None
+
+    while True:
+        if not path.exists():
+            print(f"[agent] followed file disappeared: {path}")
+            return
+
+        size = path.stat().st_size
+        readable_end = size - args.follow_lag_bytes
+        if readable_end > pos + 4:
+            try:
+                frames = Picoscenes(str(path), pos, readable_end)
+            except Exception as exc:
+                print(f"[agent] waiting for complete CSI frame at pos={pos}: {exc}")
+                time.sleep(args.poll_interval)
+                continue
+
+            for frame in frames.raw:
+                parsed = frame_to_csi_tensor(frame)
+                if parsed is None:
+                    continue
+                tensor, frame_metadata = parsed
+                result = extractor.add_frame(tensor, frame_metadata)
+                if result is not None:
+                    pending.append(result)
+
+            next_pos = int(frames.next_pos)
+            del frames
+            if next_pos > pos:
+                pos = next_pos
+
+        if extractor.metadata is not None and base_payload is None:
+            base_payload = {
+                "sessionId": session_id,
+                "source": "gmktec",
+                "sourceFile": str(path),
+                "samplingRateHz": args.sampling_rate,
+                "timestamp": utc_now(),
+                "csiMetadata": extractor.metadata,
+                "featureMetadata": {
+                    "baselineSeconds": args.baseline_seconds,
+                    "baselineRows": extractor.baseline_rows,
+                    "smoothSeconds": args.smooth_seconds,
+                    "streaming": True,
+                    "featureColumns": [
+                        "motionScore",
+                        "motionThreshold",
+                        "activeFlag",
+                        "pc1PhaseDiff",
+                        "phaseDiffEnergy",
+                        "amplitudeDeltaEnergy",
+                    ],
+                },
+            }
+
+        should_flush = pending and (
+            len(pending) >= args.batch_size
+            or time.monotonic() - last_post >= args.stream_post_interval
+        )
+        if should_flush and base_payload is not None:
+            batch_start, batch_features = features_to_payload(pending, args.sampling_rate)
+            send_feature_payload(args, base_payload, batch_start, batch_features)
+            pending.clear()
+            last_post = time.monotonic()
+
+        if args.once and size <= pos + args.follow_lag_bytes:
+            if pending and base_payload is not None:
+                batch_start, batch_features = features_to_payload(pending, args.sampling_rate)
+                send_feature_payload(args, base_payload, batch_start, batch_features)
+            return
+
+        time.sleep(args.poll_interval)
 
 
 def run_picoscenes(command: str) -> subprocess.Popen:
@@ -367,6 +673,11 @@ def watch_loop(args: argparse.Namespace) -> None:
             for path in sorted(watch_dir.glob(args.pattern)):
                 resolved = path.resolve()
                 if resolved in processed:
+                    continue
+                if args.follow_growing_files:
+                    session_id = f"{session_prefix}-{path.stem}"
+                    follow_growing_file(path, args, session_id=session_id)
+                    processed.add(resolved)
                     continue
                 if not wait_until_file_stable(path, args.stable_seconds, args.poll_interval):
                     continue
@@ -404,6 +715,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stop-on-error", action="store_true")
     parser.add_argument("--stable-seconds", type=float, default=2.0)
     parser.add_argument("--poll-interval", type=float, default=1.0)
+    parser.add_argument("--follow-growing-files", action="store_true")
+    parser.add_argument("--follow-lag-bytes", type=int, default=1024 * 1024)
+    parser.add_argument("--stream-post-interval", type=float, default=1.0)
     parser.add_argument(
         "--picoscenes-command",
         help='Optional command to launch, e.g. PicoScenes "-d debug -i 2 --mode logger --plot"',

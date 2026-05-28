@@ -56,5 +56,13 @@ if [ "${PROCESS_ONCE}" = "true" ]; then
   args+=(--once)
 fi
 
+if [ "${FOLLOW_GROWING_FILES}" = "true" ]; then
+  args+=(
+    --follow-growing-files
+    --follow-lag-bytes "${FOLLOW_LAG_BYTES}"
+    --stream-post-interval "${STREAM_POST_INTERVAL}"
+  )
+fi
+
 echo "[entrypoint] Starting GMKtec CSI agent"
 exec python /app/gmktec_csi_agent.py "${args[@]}"
