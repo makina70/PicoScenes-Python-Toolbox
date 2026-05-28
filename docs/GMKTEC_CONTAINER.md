@@ -146,6 +146,12 @@ Example payload shape:
 | `FOLLOW_GROWING_FILES` | `true` | Process a growing `.csi` file instead of waiting for completion |
 | `FOLLOW_LAG_BYTES` | `1048576` | Read this many bytes behind the file end to avoid partial frames |
 | `STREAM_POST_INTERVAL` | `1.0` | Flush streaming feature batches at least this often |
+| `CLEANUP_ENABLED` | `true` | Automatically delete old `.csi` files when the directory is too large |
+| `MAX_CSI_DIR_GB` | `20` | Maximum size for the watched CSI directory |
+| `KEEP_LATEST_FILES` | `1` | Always keep this many newest `.csi` files |
+| `CLEANUP_MIN_AGE_SECONDS` | `300` | Never delete files newer than this age |
+| `CLEANUP_INTERVAL` | `60` | How often to check disk usage |
+| `DELETE_PROCESSED_CSI` | `false` | Delete completed files immediately after successful processing |
 | `DRY_RUN` | `false` | Print batches without POSTing |
 
 ## Real-Time Mode
@@ -184,6 +190,44 @@ is ready, logs should include:
 ```text
 [agent] streaming baseline ready rows=500 threshold=...
 [agent] posted batch start=...
+```
+
+## Storage Cleanup
+
+The agent now keeps GMKtec storage bounded by default.  It does not delete the
+currently written `.csi` file.  Instead, every `CLEANUP_INTERVAL` seconds it
+checks `data/csi` and, if the directory exceeds `MAX_CSI_DIR_GB`, deletes older
+`.csi` files first.
+
+Default policy:
+
+```text
+CLEANUP_ENABLED=true
+MAX_CSI_DIR_GB=20
+KEEP_LATEST_FILES=1
+CLEANUP_MIN_AGE_SECONDS=300
+```
+
+This means:
+
+- keep the active/latest file
+- do not delete files from the last 5 minutes
+- cap the directory at about 20 GB by deleting oldest files
+
+For a tighter cap:
+
+```bash
+MAX_CSI_DIR_GB=5 \
+RUN_PICOSCENES=false \
+FOLLOW_GROWING_FILES=true \
+API_URL=http://<ML_API_HOST>:8001/csi/features \
+docker compose -f docker-compose.gmktec.yml up -d --build
+```
+
+If you want completed files deleted immediately after batch processing, enable:
+
+```bash
+DELETE_PROCESSED_CSI=true
 ```
 
 ## Notes

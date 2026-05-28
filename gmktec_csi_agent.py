@@ -534,6 +534,69 @@ def wait_until_file_stable(path: Path, stable_seconds: float, poll_interval: flo
         time.sleep(poll_interval)
 
 
+def cleanup_csi_files(
+    watch_dir: Path,
+    pattern: str,
+    active_paths: set[Path],
+    max_dir_gb: float,
+    keep_latest_files: int,
+    min_age_seconds: float,
+) -> None:
+    if max_dir_gb <= 0:
+        return
+
+    files = [path for path in watch_dir.glob(pattern) if path.is_file()]
+    if not files:
+        return
+
+    stats: list[tuple[Path, int, float]] = []
+    total_size = 0
+    for path in files:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        stats.append((path, stat.st_size, stat.st_mtime))
+        total_size += stat.st_size
+
+    max_bytes = int(max_dir_gb * 1024 * 1024 * 1024)
+    if total_size <= max_bytes:
+        return
+
+    now = time.time()
+    protected = {path.resolve() for path in active_paths}
+    latest = sorted(stats, key=lambda item: item[2], reverse=True)[:keep_latest_files]
+    protected.update(path.resolve() for path, _, _ in latest)
+
+    candidates = sorted(stats, key=lambda item: item[2])
+    for path, size, mtime in candidates:
+        if total_size <= max_bytes:
+            break
+        if path.resolve() in protected:
+            continue
+        if now - mtime < min_age_seconds:
+            continue
+        try:
+            path.unlink()
+            total_size -= size
+            print(f"[agent] cleanup deleted {path} size={size / (1024 * 1024):.1f}MiB")
+        except OSError as exc:
+            print(f"[agent] cleanup could not delete {path}: {exc}")
+
+
+def maybe_cleanup(watch_dir: Path, active_paths: set[Path], args: argparse.Namespace) -> None:
+    if not args.cleanup_enabled:
+        return
+    cleanup_csi_files(
+        watch_dir=watch_dir,
+        pattern=args.pattern,
+        active_paths=active_paths,
+        max_dir_gb=args.max_csi_dir_gb,
+        keep_latest_files=args.keep_latest_files,
+        min_age_seconds=args.cleanup_min_age_seconds,
+    )
+
+
 def process_file(path: Path, args: argparse.Namespace, session_id: str) -> None:
     print(f"[agent] processing {path}")
     csi_tensor, csi_metadata = load_csi_tensor_chunked(
@@ -567,6 +630,13 @@ def process_file(path: Path, args: argparse.Namespace, session_id: str) -> None:
     for start, batch_features in feature_batches(features, args.sampling_rate, args.batch_size):
         send_feature_payload(args, base_payload, start, batch_features)
 
+    if args.delete_processed_csi and not args.dry_run:
+        try:
+            path.unlink()
+            print(f"[agent] deleted processed CSI file {path}")
+        except OSError as exc:
+            print(f"[agent] could not delete processed CSI file {path}: {exc}")
+
 
 def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -> None:
     print(f"[agent] following growing file {path}")
@@ -579,6 +649,7 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
     pos = 0
     pending: list[tuple[int, np.ndarray]] = []
     last_post = time.monotonic()
+    last_cleanup = time.monotonic()
     base_payload: dict | None = None
 
     while True:
@@ -644,10 +715,20 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
             pending.clear()
             last_post = time.monotonic()
 
+        if time.monotonic() - last_cleanup >= args.cleanup_interval:
+            maybe_cleanup(path.parent, {path.resolve()}, args)
+            last_cleanup = time.monotonic()
+
         if args.once and size <= pos + args.follow_lag_bytes:
             if pending and base_payload is not None:
                 batch_start, batch_features = features_to_payload(pending, args.sampling_rate)
                 send_feature_payload(args, base_payload, batch_start, batch_features)
+            if args.delete_processed_csi and not args.dry_run:
+                try:
+                    path.unlink()
+                    print(f"[agent] deleted processed CSI file {path}")
+                except OSError as exc:
+                    print(f"[agent] could not delete processed CSI file {path}: {exc}")
             return
 
         time.sleep(args.poll_interval)
@@ -665,6 +746,7 @@ def watch_loop(args: argparse.Namespace) -> None:
     session_prefix = args.session_id or f"gmktec-{uuid.uuid4().hex[:8]}"
 
     pico_process: subprocess.Popen | None = None
+    last_cleanup = time.monotonic()
     if args.picoscenes_command:
         pico_process = run_picoscenes(args.picoscenes_command)
 
@@ -684,6 +766,10 @@ def watch_loop(args: argparse.Namespace) -> None:
                 session_id = f"{session_prefix}-{path.stem}"
                 process_file(path, args, session_id=session_id)
                 processed.add(resolved)
+
+            if time.monotonic() - last_cleanup >= args.cleanup_interval:
+                maybe_cleanup(watch_dir, set(), args)
+                last_cleanup = time.monotonic()
 
             if args.once:
                 break
@@ -718,6 +804,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--follow-growing-files", action="store_true")
     parser.add_argument("--follow-lag-bytes", type=int, default=1024 * 1024)
     parser.add_argument("--stream-post-interval", type=float, default=1.0)
+    parser.add_argument("--cleanup-enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--max-csi-dir-gb", type=float, default=20.0)
+    parser.add_argument("--keep-latest-files", type=int, default=1)
+    parser.add_argument("--cleanup-min-age-seconds", type=float, default=300.0)
+    parser.add_argument("--cleanup-interval", type=float, default=60.0)
+    parser.add_argument("--delete-processed-csi", action="store_true")
     parser.add_argument(
         "--picoscenes-command",
         help='Optional command to launch, e.g. PicoScenes "-d debug -i 2 --mode logger --plot"',

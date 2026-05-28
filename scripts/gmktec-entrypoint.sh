@@ -60,8 +60,25 @@ if [ "${FOLLOW_GROWING_FILES}" = "true" ]; then
   args+=(
     --follow-growing-files
     --follow-lag-bytes "${FOLLOW_LAG_BYTES}"
-    --stream-post-interval "${STREAM_POST_INTERVAL}"
+  --stream-post-interval "${STREAM_POST_INTERVAL}"
   )
+fi
+
+if [ "${CLEANUP_ENABLED}" = "true" ]; then
+  args+=(--cleanup-enabled)
+else
+  args+=(--no-cleanup-enabled)
+fi
+
+args+=(
+  --max-csi-dir-gb "${MAX_CSI_DIR_GB}"
+  --keep-latest-files "${KEEP_LATEST_FILES}"
+  --cleanup-min-age-seconds "${CLEANUP_MIN_AGE_SECONDS}"
+  --cleanup-interval "${CLEANUP_INTERVAL}"
+)
+
+if [ "${DELETE_PROCESSED_CSI}" = "true" ]; then
+  args+=(--delete-processed-csi)
 fi
 
 echo "[entrypoint] Starting GMKtec CSI agent"
