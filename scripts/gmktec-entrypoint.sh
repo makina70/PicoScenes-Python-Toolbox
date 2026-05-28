@@ -34,6 +34,8 @@ args=(
   --watch-dir "${WATCH_DIR}"
   --pattern "${PATTERN}"
   --api-url "${API_URL}"
+  --api-format "${API_FORMAT}"
+  --legacy-series "${LEGACY_SERIES}"
   --sampling-rate "${SAMPLING_RATE}"
   --baseline-seconds "${BASELINE_SECONDS}"
   --smooth-seconds "${SMOOTH_SECONDS}"

@@ -4,8 +4,8 @@ GMKtec-side CSI agent.
 This watches PicoScenes .csi output files, extracts motion-oriented CSI features,
 and posts compact feature batches to the ML API.
 
-Target API:
-    POST /csi/features
+Default target API:
+    POST /csi
 
 The script intentionally sends features, not raw .csi files.  Raw CSI files can
 be hundreds of MB and are expensive to move into the ML container.
@@ -493,16 +493,26 @@ def send_feature_payload(
     batch_start: int,
     batch_features: dict,
 ) -> None:
-    payload = {
-        **base_payload,
-        "batchStart": batch_start,
-        "features": batch_features,
-    }
+    if args.api_format == "legacy":
+        series = batch_features[args.legacy_series]
+        payload = {
+            "samplingRateHz": base_payload["samplingRateHz"],
+            "pc1PhaseVariation": series,
+            "timestamp": utc_now(),
+        }
+    else:
+        payload = {
+            **base_payload,
+            "batchStart": batch_start,
+            "features": batch_features,
+        }
+
     if args.dry_run:
         print(
             "[agent] dry-run batch "
             f"start={batch_start} samples={len(batch_features['motionScore'])} "
-            f"latestMotionScore={batch_features['motionScore'][-1]:.3f}"
+            f"latestMotionScore={batch_features['motionScore'][-1]:.3f} "
+            f"apiFormat={args.api_format}"
         )
         return
 
@@ -785,7 +795,19 @@ def watch_loop(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-url", default="http://localhost:8001/csi/features")
+    parser.add_argument("--api-url", default="http://localhost:8001/csi")
+    parser.add_argument("--api-format", choices=["legacy", "features"], default="legacy")
+    parser.add_argument(
+        "--legacy-series",
+        choices=[
+            "pc1PhaseDiff",
+            "motionScore",
+            "phaseDiffEnergy",
+            "amplitudeDeltaEnergy",
+        ],
+        default="pc1PhaseDiff",
+        help="Feature series sent as pc1PhaseVariation when --api-format=legacy.",
+    )
     parser.add_argument("--watch-dir", default=".")
     parser.add_argument("--pattern", default="*.csi")
     parser.add_argument("--once", action="store_true")

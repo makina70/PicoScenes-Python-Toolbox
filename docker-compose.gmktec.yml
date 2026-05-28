@@ -8,7 +8,9 @@ services:
     privileged: true
     restart: unless-stopped
     environment:
-      API_URL: ${API_URL:-http://127.0.0.1:8001/csi/features}
+      API_URL: ${API_URL:-http://127.0.0.1:8001/csi}
+      API_FORMAT: ${API_FORMAT:-legacy}
+      LEGACY_SERIES: ${LEGACY_SERIES:-pc1PhaseDiff}
       WATCH_DIR: /data/csi
       PATTERN: ${PATTERN:-*.csi}
       SAMPLING_RATE: ${SAMPLING_RATE:-100.0}

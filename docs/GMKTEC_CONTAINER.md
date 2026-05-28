@@ -6,10 +6,9 @@ It performs:
 1. CSI acquisition with `PicoScenes`
 2. `.csi` file detection
 3. CSI preprocessing into compact motion features
-4. `POST /csi/features` to the ML API container
+4. `POST /csi` to the current ML API container
 
-It sends features, not raw `.csi` files.  This avoids moving hundreds of MB per
-capture into the ML API.
+It sends compact time-series samples, not raw `.csi` files.  This avoids moving hundreds of MB per capture into the ML API.
 
 ## Directory Layout
 
@@ -49,7 +48,7 @@ docker compose -f docker-compose.gmktec.yml build
 Set the ML API URL and start the agent:
 
 ```bash
-API_URL=http://<ML_API_HOST>:8001/csi/features \
+API_URL=http://<ML_API_HOST>:8001/csi \
 docker compose -f docker-compose.gmktec.yml up
 ```
 
@@ -63,7 +62,7 @@ Override it when needed:
 
 ```bash
 PICOSCENES_COMMAND='PicoScenes "-d debug -i 2 --mode logger --plot"' \
-API_URL=http://<ML_API_HOST>:8001/csi/features \
+API_URL=http://<ML_API_HOST>:8001/csi \
 docker compose -f docker-compose.gmktec.yml up
 ```
 
@@ -89,54 +88,32 @@ data/csi/
 The agent posts batches to:
 
 ```text
-POST /csi/features
+POST /csi
 ```
 
-Example payload shape:
+Default payload shape for the current ML API:
 
 ```json
 {
-  "sessionId": "gmktec-xxxx-capture",
-  "source": "gmktec",
-  "sourceFile": "/data/csi/capture.csi",
   "samplingRateHz": 100.0,
-  "timestamp": "2026-05-28T12:00:00+00:00",
-  "batchStart": 0,
-  "csiMetadata": {
-    "originalNumTones": 2025,
-    "numTones": 254,
-    "subcarrierStride": 8,
-    "numTx": 2,
-    "numRx": 2
-  },
-  "featureMetadata": {
-    "motionThreshold": 18.667,
-    "featureColumns": [
-      "motionScore",
-      "motionThreshold",
-      "activeFlag",
-      "pc1PhaseDiff",
-      "phaseDiffEnergy",
-      "amplitudeDeltaEnergy"
-    ]
-  },
-  "features": {
-    "timeSeconds": [0.0, 0.01],
-    "motionScore": [1.2, 1.4],
-    "motionThreshold": [4.0, 4.0],
-    "activeFlag": [0.0, 0.0],
-    "pc1PhaseDiff": [-12.0, 8.1],
-    "phaseDiffEnergy": [0.9, 1.0],
-    "amplitudeDeltaEnergy": [0.7, 0.8]
-  }
+  "pc1PhaseVariation": [-12.0, 8.1],
+  "timestamp": "2026-05-28T12:00:00+00:00"
 }
 ```
+
+The agent computes several features internally.  In default `legacy` mode it
+sends `pc1PhaseDiff` as `pc1PhaseVariation` because the current ML API schema
+expects that field.  After the ML API is upgraded, set `API_FORMAT=features`
+and `API_URL=http://<ML_API_HOST>:8001/csi/features` to send the extended
+feature payload.
 
 ## Important Environment Variables
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `API_URL` | `http://127.0.0.1:8001/csi/features` | ML API endpoint |
+| `API_URL` | `http://127.0.0.1:8001/csi` | ML API endpoint |
+| `API_FORMAT` | `legacy` | `legacy` sends the current ML API payload; `features` sends extended feature batches |
+| `LEGACY_SERIES` | `pc1PhaseDiff` | Feature sent as `pc1PhaseVariation` in legacy mode |
 | `RUN_PICOSCENES` | `true` | Launch PicoScenes from inside the container |
 | `PICOSCENES_COMMAND` | `PicoScenes "-d debug -i 2 --mode logger --plot"` | Acquisition command |
 | `WATCH_DIR` | `/data/csi` | Directory watched for `.csi` files |
@@ -173,7 +150,7 @@ Recommended GMKtec command when PicoScenes runs on the host:
 ```bash
 RUN_PICOSCENES=false \
 FOLLOW_GROWING_FILES=true \
-API_URL=http://<ML_API_HOST>:8001/csi/features \
+API_URL=http://<ML_API_HOST>:8001/csi \
 docker compose -f docker-compose.gmktec.yml up -d --build
 ```
 
@@ -221,7 +198,7 @@ For a tighter cap:
 MAX_CSI_DIR_GB=5 \
 RUN_PICOSCENES=false \
 FOLLOW_GROWING_FILES=true \
-API_URL=http://<ML_API_HOST>:8001/csi/features \
+API_URL=http://<ML_API_HOST>:8001/csi \
 docker compose -f docker-compose.gmktec.yml up -d --build
 ```
 
