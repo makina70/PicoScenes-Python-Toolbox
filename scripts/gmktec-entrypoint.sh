@@ -60,7 +60,8 @@ if [ "${FOLLOW_GROWING_FILES}" = "true" ]; then
   args+=(
     --follow-growing-files
     --follow-lag-bytes "${FOLLOW_LAG_BYTES}"
-  --stream-post-interval "${STREAM_POST_INTERVAL}"
+    --stream-read-mb "${STREAM_READ_MB}"
+    --stream-post-interval "${STREAM_POST_INTERVAL}"
   )
 fi
 

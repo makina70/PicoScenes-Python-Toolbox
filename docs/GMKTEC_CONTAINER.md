@@ -145,6 +145,7 @@ Example payload shape:
 | `BATCH_SIZE` | `500` | Samples per API POST |
 | `FOLLOW_GROWING_FILES` | `true` | Process a growing `.csi` file instead of waiting for completion |
 | `FOLLOW_LAG_BYTES` | `1048576` | Read this many bytes behind the file end to avoid partial frames |
+| `STREAM_READ_MB` | `32` | Maximum bytes read from a growing `.csi` file per parser call |
 | `STREAM_POST_INTERVAL` | `1.0` | Flush streaming feature batches at least this often |
 | `CLEANUP_ENABLED` | `true` | Automatically delete old `.csi` files when the directory is too large |
 | `MAX_CSI_DIR_GB` | `20` | Maximum size for the watched CSI directory |
@@ -164,8 +165,8 @@ FOLLOW_GROWING_FILES=true
 
 In this mode the agent does not wait for PicoScenes to finish writing the file.
 It tails the growing `.csi` file, stays about `FOLLOW_LAG_BYTES` behind the file
-end to avoid incomplete frames, extracts features, and posts batches while the
-recording is still running.
+end to avoid incomplete frames, reads at most `STREAM_READ_MB` per parser call,
+extracts features, and posts batches while the recording is still running.
 
 Recommended GMKtec command when PicoScenes runs on the host:
 

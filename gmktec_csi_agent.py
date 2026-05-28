@@ -660,8 +660,9 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
         size = path.stat().st_size
         readable_end = size - args.follow_lag_bytes
         if readable_end > pos + 4:
+            chunk_end = min(readable_end, pos + args.stream_read_mb * 1024 * 1024)
             try:
-                frames = Picoscenes(str(path), pos, readable_end)
+                frames = Picoscenes(str(path), pos, chunk_end)
             except Exception as exc:
                 print(f"[agent] waiting for complete CSI frame at pos={pos}: {exc}")
                 time.sleep(args.poll_interval)
@@ -803,6 +804,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--follow-growing-files", action="store_true")
     parser.add_argument("--follow-lag-bytes", type=int, default=1024 * 1024)
+    parser.add_argument("--stream-read-mb", type=int, default=32)
     parser.add_argument("--stream-post-interval", type=float, default=1.0)
     parser.add_argument("--cleanup-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-csi-dir-gb", type=float, default=20.0)
