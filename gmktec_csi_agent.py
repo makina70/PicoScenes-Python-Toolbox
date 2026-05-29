@@ -493,8 +493,8 @@ def send_feature_payload(
     batch_start: int,
     batch_features: dict,
 ) -> None:
+    series = batch_features[args.legacy_series]
     if args.api_format == "legacy":
-        series = batch_features[args.legacy_series]
         payload = {
             "samplingRateHz": base_payload["samplingRateHz"],
             "pc1PhaseVariation": series,
@@ -516,9 +516,17 @@ def send_feature_payload(
         )
         return
 
+    series_array = np.asarray(series, dtype=np.float32)
+    series_summary = (
+        f"legacySeries={args.legacy_series} "
+        f"n={series_array.size} "
+        f"min={float(np.min(series_array)):.6g} "
+        f"max={float(np.max(series_array)):.6g} "
+        f"std={float(np.std(series_array)):.6g}"
+    )
     try:
         result = post_json(args.api_url, payload, timeout=args.timeout)
-        print(f"[agent] posted batch start={batch_start} result={result}")
+        print(f"[agent] posted batch start={batch_start} {series_summary} result={result}")
     except (HTTPError, URLError, TimeoutError) as exc:
         print(f"[agent] POST failed start={batch_start}: {exc}")
         if args.stop_on_error:
