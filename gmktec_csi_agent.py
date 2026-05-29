@@ -681,6 +681,18 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
         max_tones=args.max_tones,
     )
     pos = 0
+    if args.stream_start_at_end and path.exists():
+        size = path.stat().st_size
+        tail_bytes = max(
+            args.follow_lag_bytes + args.stream_read_mb * 1024 * 1024,
+            args.follow_lag_bytes + 1024 * 1024,
+        )
+        pos = max(0, size - tail_bytes)
+        print(
+            "[agent] starting near live tail "
+            f"size={size} pos={pos} lagBytes={args.follow_lag_bytes} "
+            f"readMb={args.stream_read_mb}"
+        )
     pending: list[tuple[int, np.ndarray]] = []
     last_post = time.monotonic()
     last_cleanup = time.monotonic()
@@ -916,6 +928,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--follow-growing-files", action="store_true")
     parser.add_argument("--follow-lag-bytes", type=int, default=1024 * 1024)
+    parser.add_argument("--stream-start-at-end", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--stream-read-mb", type=int, default=32)
     parser.add_argument("--stream-post-interval", type=float, default=1.0)
     parser.add_argument("--cleanup-enabled", action=argparse.BooleanOptionalAction, default=True)
