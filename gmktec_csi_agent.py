@@ -699,6 +699,7 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
     last_status_log = time.monotonic()
     base_payload: dict | None = None
     last_sent_hash: str | None = None
+    pending_parser_pos: int | None = None
     recent_frame_hashes: deque[str] = deque(maxlen=4096)
     recent_frame_hash_set: set[str] = set()
 
@@ -718,6 +719,21 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
             return "rotate"
 
         readable_end = size - args.follow_lag_bytes
+        if pending_parser_pos is not None:
+            if readable_end >= pending_parser_pos:
+                print(f"[agent] advancing to deferred parser boundary pos={pending_parser_pos}")
+                pos = pending_parser_pos
+                pending_parser_pos = None
+            elif time.monotonic() - last_status_log >= 10:
+                print(
+                    "[agent] waiting for parser boundary "
+                    f"pos={pos} pendingPos={pending_parser_pos} "
+                    f"readableEnd={readable_end} size={size}"
+                )
+                last_status_log = time.monotonic()
+                time.sleep(args.poll_interval)
+                continue
+
         if readable_end > pos + 4:
             chunk_start = pos
             chunk_end = min(readable_end, pos + args.stream_read_mb * 1024 * 1024)
@@ -752,8 +768,16 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
 
             next_pos = int(frames.next_pos)
             del frames
-            if pos < next_pos <= chunk_end:
+            if pos < next_pos <= readable_end:
                 pos = next_pos
+                pending_parser_pos = None
+            elif next_pos > readable_end:
+                pending_parser_pos = next_pos
+                print(
+                    "[agent] deferring stream position to parser boundary "
+                    f"next_pos={next_pos} readableEnd={readable_end} "
+                    f"chunkStart={chunk_start} chunkEnd={chunk_end}"
+                )
             else:
                 pos = chunk_end
                 print(
