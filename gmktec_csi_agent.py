@@ -702,6 +702,8 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
     pending_parser_pos: int | None = None
     recent_frame_hashes: deque[str] = deque(maxlen=4096)
     recent_frame_hash_set: set[str] = set()
+    last_size = path.stat().st_size if path.exists() else 0
+    last_growth = time.monotonic()
 
     while True:
         if not path.exists():
@@ -709,6 +711,20 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
             return "done"
 
         size = path.stat().st_size
+        if size > last_size:
+            last_size = size
+            last_growth = time.monotonic()
+        elif (
+            args.inactive_file_timeout_seconds > 0
+            and time.monotonic() - last_growth >= args.inactive_file_timeout_seconds
+        ):
+            print(
+                "[agent] followed file is not growing; moving on "
+                f"path={path} size={size} "
+                f"timeout={args.inactive_file_timeout_seconds}s"
+            )
+            return "done"
+
         max_active_bytes = int(args.max_active_csi_file_gb * 1024 * 1024 * 1024)
         if max_active_bytes > 0 and args.picoscenes_command and size >= max_active_bytes:
             print(
@@ -986,6 +1002,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stream-start-at-end", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--stream-read-mb", type=int, default=32)
     parser.add_argument("--stream-post-interval", type=float, default=1.0)
+    parser.add_argument("--inactive-file-timeout-seconds", type=float, default=60.0)
     parser.add_argument("--cleanup-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-csi-dir-gb", type=float, default=20.0)
     parser.add_argument("--max-active-csi-file-gb", type=float, default=10.0)

@@ -80,6 +80,7 @@ if [ "${FOLLOW_GROWING_FILES}" = "true" ]; then
     --follow-lag-bytes "${FOLLOW_LAG_BYTES}"
     --stream-read-mb "${STREAM_READ_MB}"
     --stream-post-interval "${STREAM_POST_INTERVAL}"
+    --inactive-file-timeout-seconds "${INACTIVE_FILE_TIMEOUT_SECONDS}"
   )
   if [ "${STREAM_START_AT_END}" = "true" ]; then
     args+=(--stream-start-at-end)
