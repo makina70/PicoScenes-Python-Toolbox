@@ -696,6 +696,7 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
     pending: list[tuple[int, np.ndarray]] = []
     last_post = time.monotonic()
     last_cleanup = time.monotonic()
+    last_status_log = time.monotonic()
     base_payload: dict | None = None
     last_sent_hash: str | None = None
     recent_frame_hashes: deque[str] = deque(maxlen=4096)
@@ -726,6 +727,9 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
                 time.sleep(args.poll_interval)
                 continue
 
+            raw_frames = len(frames.raw)
+            usable_frames = 0
+            emitted_features = 0
             for frame in frames.raw:
                 parsed = frame_to_csi_tensor(frame)
                 if parsed is None:
@@ -739,9 +743,11 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
                     recent_frame_hash_set.discard(oldest_hash)
                 recent_frame_hashes.append(frame_hash)
                 recent_frame_hash_set.add(frame_hash)
+                usable_frames += 1
                 result = extractor.add_frame(tensor, frame_metadata)
                 if result is not None:
                     pending.append(result)
+                    emitted_features += 1
 
             next_pos = int(frames.next_pos)
             del frames
@@ -750,6 +756,22 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
             else:
                 pos = chunk_end
                 print(f"[agent] advanced stream position to chunk_end={chunk_end} because next_pos did not move")
+            if raw_frames or time.monotonic() - last_status_log >= 10:
+                print(
+                    "[agent] stream read "
+                    f"rawFrames={raw_frames} usableFrames={usable_frames} "
+                    f"features={emitted_features} pending={len(pending)} "
+                    f"baseline={len(extractor.baseline_phase_diffs)}/{extractor.baseline_rows} "
+                    f"pos={pos} readableEnd={readable_end} size={size}"
+                )
+                last_status_log = time.monotonic()
+        elif time.monotonic() - last_status_log >= 10:
+            print(
+                "[agent] waiting for CSI growth "
+                f"pos={pos} readableEnd={readable_end} size={size} "
+                f"lagBytes={args.follow_lag_bytes}"
+            )
+            last_status_log = time.monotonic()
 
         if extractor.metadata is not None and base_payload is None:
             base_payload = {
