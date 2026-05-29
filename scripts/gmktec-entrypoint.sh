@@ -72,10 +72,14 @@ if [ "${FOLLOW_GROWING_FILES}" = "true" ]; then
   args+=(
     --follow-growing-files
     --follow-lag-bytes "${FOLLOW_LAG_BYTES}"
-    --stream-start-at-end="${STREAM_START_AT_END}"
     --stream-read-mb "${STREAM_READ_MB}"
     --stream-post-interval "${STREAM_POST_INTERVAL}"
   )
+  if [ "${STREAM_START_AT_END}" = "true" ]; then
+    args+=(--stream-start-at-end)
+  else
+    args+=(--no-stream-start-at-end)
+  fi
 fi
 
 if [ "${CLEANUP_ENABLED}" = "true" ]; then
