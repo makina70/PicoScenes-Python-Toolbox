@@ -672,7 +672,7 @@ def process_file(path: Path, args: argparse.Namespace, session_id: str) -> None:
             print(f"[agent] could not delete processed CSI file {path}: {exc}")
 
 
-def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -> None:
+def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -> str:
     print(f"[agent] following growing file {path}")
     extractor = StreamingFeatureExtractor(
         sampling_rate_hz=args.sampling_rate,
@@ -692,9 +692,18 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
     while True:
         if not path.exists():
             print(f"[agent] followed file disappeared: {path}")
-            return
+            return "done"
 
         size = path.stat().st_size
+        max_active_bytes = int(args.max_active_csi_file_gb * 1024 * 1024 * 1024)
+        if max_active_bytes > 0 and size >= max_active_bytes:
+            print(
+                "[agent] active CSI file exceeded limit "
+                f"path={path} size={size / (1024 * 1024 * 1024):.2f}GiB "
+                f"limit={args.max_active_csi_file_gb:.2f}GiB"
+            )
+            return "rotate"
+
         readable_end = size - args.follow_lag_bytes
         if readable_end > pos + 4:
             chunk_end = min(readable_end, pos + args.stream_read_mb * 1024 * 1024)
@@ -795,7 +804,7 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
                     print(f"[agent] deleted processed CSI file {path}")
                 except OSError as exc:
                     print(f"[agent] could not delete processed CSI file {path}: {exc}")
-            return
+            return "done"
 
         time.sleep(args.poll_interval)
 
@@ -803,6 +812,19 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
 def run_picoscenes(command: str) -> subprocess.Popen:
     print(f"[agent] starting PicoScenes command: {command}")
     return subprocess.Popen(shlex.split(command))
+
+
+def stop_picoscenes(process: subprocess.Popen | None, timeout: float = 10.0) -> None:
+    if process is None or process.poll() is not None:
+        return
+    print(f"[agent] stopping PicoScenes pid={process.pid}")
+    process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"[agent] killing PicoScenes pid={process.pid}")
+        process.kill()
+        process.wait(timeout=timeout)
 
 
 def watch_loop(args: argparse.Namespace) -> None:
@@ -818,14 +840,28 @@ def watch_loop(args: argparse.Namespace) -> None:
 
     try:
         while True:
+            if args.picoscenes_command and pico_process is None:
+                pico_process = run_picoscenes(args.picoscenes_command)
+
             for path in sorted(watch_dir.glob(args.pattern)):
                 resolved = path.resolve()
                 if resolved in processed:
                     continue
                 if args.follow_growing_files:
                     session_id = f"{session_prefix}-{path.stem}"
-                    follow_growing_file(path, args, session_id=session_id)
-                    processed.add(resolved)
+                    result = follow_growing_file(path, args, session_id=session_id)
+                    if result == "rotate":
+                        stop_picoscenes(pico_process)
+                        pico_process = None
+                        try:
+                            path.unlink()
+                            print(f"[agent] deleted oversized active CSI file {path}")
+                        except FileNotFoundError:
+                            pass
+                        except OSError as exc:
+                            print(f"[agent] could not delete oversized active CSI file {path}: {exc}")
+                    else:
+                        processed.add(resolved)
                     continue
                 if not wait_until_file_stable(path, args.stable_seconds, args.poll_interval):
                     continue
@@ -844,8 +880,7 @@ def watch_loop(args: argparse.Namespace) -> None:
                 pico_process = None
             time.sleep(args.poll_interval)
     finally:
-        if pico_process is not None and pico_process.poll() is None:
-            pico_process.terminate()
+        stop_picoscenes(pico_process)
 
 
 def parse_args() -> argparse.Namespace:
@@ -885,6 +920,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stream-post-interval", type=float, default=1.0)
     parser.add_argument("--cleanup-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-csi-dir-gb", type=float, default=20.0)
+    parser.add_argument("--max-active-csi-file-gb", type=float, default=10.0)
     parser.add_argument("--keep-latest-files", type=int, default=1)
     parser.add_argument("--cleanup-min-age-seconds", type=float, default=300.0)
     parser.add_argument("--cleanup-interval", type=float, default=60.0)

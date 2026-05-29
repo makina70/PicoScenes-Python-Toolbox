@@ -75,6 +75,7 @@ fi
 
 args+=(
   --max-csi-dir-gb "${MAX_CSI_DIR_GB}"
+  --max-active-csi-file-gb "${MAX_ACTIVE_CSI_FILE_GB}"
   --keep-latest-files "${KEEP_LATEST_FILES}"
   --cleanup-min-age-seconds "${CLEANUP_MIN_AGE_SECONDS}"
   --cleanup-interval "${CLEANUP_INTERVAL}"
