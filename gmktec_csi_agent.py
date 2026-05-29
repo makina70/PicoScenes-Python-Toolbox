@@ -719,6 +719,7 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
 
         readable_end = size - args.follow_lag_bytes
         if readable_end > pos + 4:
+            chunk_start = pos
             chunk_end = min(readable_end, pos + args.stream_read_mb * 1024 * 1024)
             try:
                 frames = Picoscenes(str(path), pos, chunk_end)
@@ -751,11 +752,15 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
 
             next_pos = int(frames.next_pos)
             del frames
-            if next_pos > pos:
+            if pos < next_pos <= chunk_end:
                 pos = next_pos
             else:
                 pos = chunk_end
-                print(f"[agent] advanced stream position to chunk_end={chunk_end} because next_pos did not move")
+                print(
+                    "[agent] advanced stream position to chunk_end="
+                    f"{chunk_end} because next_pos={next_pos} was outside "
+                    f"the current chunk range start={chunk_start} end={chunk_end}"
+                )
             if raw_frames or time.monotonic() - last_status_log >= 10:
                 print(
                     "[agent] stream read "
