@@ -14,6 +14,7 @@ be hundreds of MB and are expensive to move into the ML container.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shlex
 import subprocess
@@ -487,6 +488,11 @@ def features_to_payload(
     return start, payload_features
 
 
+def feature_series_hash(batch_features: dict, series_name: str) -> str:
+    series = np.asarray(batch_features[series_name], dtype=np.float32)
+    return hashlib.sha1(series.tobytes()).hexdigest()
+
+
 def send_feature_payload(
     args: argparse.Namespace,
     base_payload: dict,
@@ -517,12 +523,16 @@ def send_feature_payload(
         return
 
     series_array = np.asarray(series, dtype=np.float32)
+    series_hash = hashlib.sha1(series_array.tobytes()).hexdigest()[:12]
     series_summary = (
         f"legacySeries={args.legacy_series} "
         f"n={series_array.size} "
         f"min={float(np.min(series_array)):.6g} "
         f"max={float(np.max(series_array)):.6g} "
-        f"std={float(np.std(series_array)):.6g}"
+        f"std={float(np.std(series_array)):.6g} "
+        f"first={float(series_array[0]):.6g} "
+        f"last={float(series_array[-1]):.6g} "
+        f"sha1={series_hash}"
     )
     try:
         result = post_json(args.api_url, payload, timeout=args.timeout)
@@ -669,6 +679,7 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
     last_post = time.monotonic()
     last_cleanup = time.monotonic()
     base_payload: dict | None = None
+    last_sent_hash: str | None = None
 
     while True:
         if not path.exists():
@@ -730,7 +741,16 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
         )
         if should_flush and base_payload is not None:
             batch_start, batch_features = features_to_payload(pending, args.sampling_rate)
-            send_feature_payload(args, base_payload, batch_start, batch_features)
+            current_hash = feature_series_hash(batch_features, args.legacy_series)
+            if current_hash == last_sent_hash:
+                print(
+                    "[agent] skipped duplicate batch "
+                    f"start={batch_start} legacySeries={args.legacy_series} "
+                    f"sha1={current_hash[:12]}"
+                )
+            else:
+                send_feature_payload(args, base_payload, batch_start, batch_features)
+                last_sent_hash = current_hash
             pending.clear()
             last_post = time.monotonic()
 
@@ -741,7 +761,15 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
         if args.once and size <= pos + args.follow_lag_bytes:
             if pending and base_payload is not None:
                 batch_start, batch_features = features_to_payload(pending, args.sampling_rate)
-                send_feature_payload(args, base_payload, batch_start, batch_features)
+                current_hash = feature_series_hash(batch_features, args.legacy_series)
+                if current_hash == last_sent_hash:
+                    print(
+                        "[agent] skipped duplicate batch "
+                        f"start={batch_start} legacySeries={args.legacy_series} "
+                        f"sha1={current_hash[:12]}"
+                    )
+                else:
+                    send_feature_payload(args, base_payload, batch_start, batch_features)
             if args.delete_processed_csi and not args.dry_run:
                 try:
                     path.unlink()
