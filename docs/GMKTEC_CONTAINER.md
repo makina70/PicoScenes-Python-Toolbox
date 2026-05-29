@@ -3,12 +3,15 @@
 This container is the GMKtec-side component for the API-based exhibition setup.
 It performs:
 
-1. CSI acquisition with `PicoScenes`
-2. `.csi` file detection
-3. CSI preprocessing into compact motion features
-4. `POST /csi` to the current ML API container
+1. `.csi` file detection
+2. CSI preprocessing into compact motion features
+3. `POST /csi` to the current ML API container
 
 It sends compact time-series samples, not raw `.csi` files.  This avoids moving hundreds of MB per capture into the ML API.
+
+PicoScenes itself should run on the GMKtec host, not inside this container.
+PicoScenes detects containers as a virtualization environment and may refuse to
+run there.
 
 ## Directory Layout
 
@@ -17,8 +20,8 @@ PicoScenes-Python-Toolbox/
   docker-compose.gmktec.yml
   Dockerfile.gmktec
   gmktec_csi_agent.py
+  scripts/run-picoscenes-rotating.sh
   data/csi/                 # PicoScenes output and watched .csi files
-  picoscenes-installer/     # optional PicoScenes Linux .deb package(s)
 ```
 
 ## First Setup On GMKtec
@@ -30,29 +33,40 @@ git clone https://github.com/exyrias/PicoScenes-Python-Toolbox.git
 cd PicoScenes-Python-Toolbox
 ```
 
-If PicoScenes is not already available inside the image, put the Linux
-PicoScenes `.deb` package in:
-
-```text
-picoscenes-installer/
-```
-
 Then build:
 
 ```bash
 docker compose -f docker-compose.gmktec.yml build
 ```
 
-## Run With Acquisition Enabled
+## Run The Agent Container
 
 Set the ML API URL and start the agent:
 
 ```bash
-API_URL=http://<ML_API_HOST>:8001/csi \
-docker compose -f docker-compose.gmktec.yml up
+sudo env \
+  RUN_PICOSCENES=false \
+  FOLLOW_GROWING_FILES=true \
+  STREAM_READ_MB=32 \
+  MAX_CSI_DIR_GB=5 \
+  API_URL=http://<ML_API_HOST>:8001/csi \
+  docker compose -f docker-compose.gmktec.yml up -d --build
 ```
 
-The default PicoScenes command is:
+The container watches `data/csi` and posts feature batches to the ML API.
+
+## Run PicoScenes On The Host With Rotation
+
+Use the host-side wrapper instead of running `PicoScenes` directly.  It starts
+PicoScenes from `data/csi`, monitors the active `.csi` file, and restarts
+PicoScenes after deleting the active file when it exceeds the configured size.
+
+```bash
+MAX_ACTIVE_CSI_FILE_GB=5 \
+scripts/run-picoscenes-rotating.sh
+```
+
+The default PicoScenes command used by the wrapper is:
 
 ```bash
 PicoScenes "-d debug -i 2 --mode logger --plot"
@@ -62,8 +76,8 @@ Override it when needed:
 
 ```bash
 PICOSCENES_COMMAND='PicoScenes "-d debug -i 2 --mode logger --plot"' \
-API_URL=http://<ML_API_HOST>:8001/csi \
-docker compose -f docker-compose.gmktec.yml up
+MAX_ACTIVE_CSI_FILE_GB=5 \
+scripts/run-picoscenes-rotating.sh
 ```
 
 ## Process Existing CSI Files Only
@@ -113,8 +127,8 @@ feature payload.
 | --- | --- | --- |
 | `API_URL` | `http://127.0.0.1:8001/csi` | ML API endpoint |
 | `API_FORMAT` | `legacy` | `legacy` sends the current ML API payload; `features` sends extended feature batches |
-| `LEGACY_SERIES` | `pc1PhaseDiff` | Feature sent as `pc1PhaseVariation` in legacy mode |
-| `RUN_PICOSCENES` | `true` | Launch PicoScenes from inside the container |
+| `LEGACY_SERIES` | `motionScore` | Feature sent as `pc1PhaseVariation` in legacy mode |
+| `RUN_PICOSCENES` | `false` | Keep this false; PicoScenes should run on the host |
 | `PICOSCENES_COMMAND` | `PicoScenes "-d debug -i 2 --mode logger --plot"` | Acquisition command |
 | `WATCH_DIR` | `/data/csi` | Directory watched for `.csi` files |
 | `MAX_TONES` | `256` | Maximum subcarriers kept after downsampling |
@@ -126,6 +140,7 @@ feature payload.
 | `STREAM_POST_INTERVAL` | `1.0` | Flush streaming feature batches at least this often |
 | `CLEANUP_ENABLED` | `true` | Automatically delete old `.csi` files when the directory is too large |
 | `MAX_CSI_DIR_GB` | `20` | Maximum size for the watched CSI directory |
+| `MAX_ACTIVE_CSI_FILE_GB` | `10` | Host wrapper active-file rotation limit |
 | `KEEP_LATEST_FILES` | `1` | Always keep this many newest `.csi` files |
 | `CLEANUP_MIN_AGE_SECONDS` | `300` | Never delete files newer than this age |
 | `CLEANUP_INTERVAL` | `60` | How often to check disk usage |
@@ -145,20 +160,22 @@ It tails the growing `.csi` file, stays about `FOLLOW_LAG_BYTES` behind the file
 end to avoid incomplete frames, reads at most `STREAM_READ_MB` per parser call,
 extracts features, and posts batches while the recording is still running.
 
-Recommended GMKtec command when PicoScenes runs on the host:
+Recommended GMKtec agent command:
 
 ```bash
-RUN_PICOSCENES=false \
-FOLLOW_GROWING_FILES=true \
-API_URL=http://<ML_API_HOST>:8001/csi \
-docker compose -f docker-compose.gmktec.yml up -d --build
+sudo env \
+  RUN_PICOSCENES=false \
+  FOLLOW_GROWING_FILES=true \
+  STREAM_READ_MB=32 \
+  MAX_CSI_DIR_GB=5 \
+  API_URL=http://<ML_API_HOST>:8001/csi \
+  docker compose -f docker-compose.gmktec.yml up -d --build
 ```
 
-Then run PicoScenes from the watched directory:
+Then run the host-side PicoScenes wrapper:
 
 ```bash
-cd data/csi
-PicoScenes "-d debug -i 2 --mode logger --plot"
+MAX_ACTIVE_CSI_FILE_GB=5 scripts/run-picoscenes-rotating.sh
 ```
 
 The first `BASELINE_SECONDS` seconds are used to learn the empty-room baseline.
@@ -172,10 +189,10 @@ is ready, logs should include:
 
 ## Storage Cleanup
 
-The agent now keeps GMKtec storage bounded by default.  It does not delete the
-currently written `.csi` file.  Instead, every `CLEANUP_INTERVAL` seconds it
-checks `data/csi` and, if the directory exceeds `MAX_CSI_DIR_GB`, deletes older
-`.csi` files first.
+The container agent deletes older inactive `.csi` files when the watched
+directory exceeds `MAX_CSI_DIR_GB`.  The host-side PicoScenes wrapper handles
+the active file by stopping PicoScenes, deleting the oversized active file, and
+starting PicoScenes again.
 
 Default policy:
 
@@ -188,18 +205,22 @@ CLEANUP_MIN_AGE_SECONDS=300
 
 This means:
 
-- keep the active/latest file
+- inactive files are capped by the agent
+- the active file is capped by `scripts/run-picoscenes-rotating.sh`
 - do not delete files from the last 5 minutes
-- cap the directory at about 20 GB by deleting oldest files
+- cap the directory at about 20 GB by deleting oldest inactive files
 
 For a tighter cap:
 
 ```bash
-MAX_CSI_DIR_GB=5 \
-RUN_PICOSCENES=false \
-FOLLOW_GROWING_FILES=true \
-API_URL=http://<ML_API_HOST>:8001/csi \
-docker compose -f docker-compose.gmktec.yml up -d --build
+sudo env \
+  MAX_CSI_DIR_GB=5 \
+  RUN_PICOSCENES=false \
+  FOLLOW_GROWING_FILES=true \
+  API_URL=http://<ML_API_HOST>:8001/csi \
+  docker compose -f docker-compose.gmktec.yml up -d --build
+
+MAX_ACTIVE_CSI_FILE_GB=5 scripts/run-picoscenes-rotating.sh
 ```
 
 If you want completed files deleted immediately after batch processing, enable:
@@ -212,7 +233,5 @@ DELETE_PROCESSED_CSI=true
 
 - The container uses `network_mode: host` so `127.0.0.1:8001` can reach an ML
   API running on the same GMKtec host.
-- The compose file runs with `privileged: true` and mounts `/dev` because
-  PicoScenes hardware access may require device access.
-- If `--plot` needs X11/GUI access, extra host display mounts may be required.
-  For unattended operation, prefer running PicoScenes without `--plot`.
+- PicoScenes should run on the host.  The container only tails `.csi` files and
+  sends compact batches to the ML API.
