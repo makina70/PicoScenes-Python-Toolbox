@@ -56,6 +56,12 @@ args=(
   --poll-interval "${POLL_INTERVAL}"
 )
 
+if [ "${IGNORE_EXISTING_FILES}" = "true" ]; then
+  args+=(--ignore-existing-files)
+else
+  args+=(--no-ignore-existing-files)
+fi
+
 if [ "${RUN_PICOSCENES}" = "true" ]; then
   args+=(--picoscenes-command "${PICOSCENES_COMMAND}")
 fi

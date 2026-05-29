@@ -870,6 +870,9 @@ def watch_loop(args: argparse.Namespace) -> None:
     watch_dir = Path(args.watch_dir)
     watch_dir.mkdir(parents=True, exist_ok=True)
     processed: set[Path] = set()
+    if args.ignore_existing_files:
+        processed = {path.resolve() for path in watch_dir.glob(args.pattern)}
+        print(f"[agent] ignoring existing CSI files at startup count={len(processed)}")
     session_prefix = args.session_id or f"gmktec-{uuid.uuid4().hex[:8]}"
 
     pico_process: subprocess.Popen | None = None
@@ -939,6 +942,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--watch-dir", default=".")
     parser.add_argument("--pattern", default="*.csi")
+    parser.add_argument("--ignore-existing-files", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--file", type=Path, help="Process one .csi file immediately.")
     parser.add_argument("--dry-run", action="store_true")
