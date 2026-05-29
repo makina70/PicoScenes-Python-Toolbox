@@ -696,7 +696,7 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
 
         size = path.stat().st_size
         max_active_bytes = int(args.max_active_csi_file_gb * 1024 * 1024 * 1024)
-        if max_active_bytes > 0 and size >= max_active_bytes:
+        if max_active_bytes > 0 and args.picoscenes_command and size >= max_active_bytes:
             print(
                 "[agent] active CSI file exceeded limit "
                 f"path={path} size={size / (1024 * 1024 * 1024):.2f}GiB "

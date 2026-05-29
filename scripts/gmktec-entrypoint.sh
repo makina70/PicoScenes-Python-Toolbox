@@ -3,7 +3,17 @@ set -euo pipefail
 
 if ! command -v PicoScenes >/dev/null 2>&1; then
   shopt -s nullglob
-  debs=(/picoscenes-installer/*.deb)
+  debs=()
+  for deb in /picoscenes-installer/*.deb; do
+    case "$(basename "${deb}")" in
+      picoscenes-source-updater*.deb)
+        echo "[entrypoint] Skipping ${deb}; it configures host apt sources and is not PicoScenes itself."
+        ;;
+      *)
+        debs+=("${deb}")
+        ;;
+    esac
+  done
   shopt -u nullglob
 
   if [ "${#debs[@]}" -gt 0 ]; then
