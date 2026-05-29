@@ -20,6 +20,7 @@ import shlex
 import subprocess
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -493,6 +494,11 @@ def feature_series_hash(batch_features: dict, series_name: str) -> str:
     return hashlib.sha1(series.tobytes()).hexdigest()
 
 
+def csi_tensor_hash(tensor: np.ndarray) -> str:
+    contiguous = np.ascontiguousarray(tensor)
+    return hashlib.sha1(contiguous.view(np.uint8)).hexdigest()
+
+
 def send_feature_payload(
     args: argparse.Namespace,
     base_payload: dict,
@@ -680,6 +686,8 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
     last_cleanup = time.monotonic()
     base_payload: dict | None = None
     last_sent_hash: str | None = None
+    recent_frame_hashes: deque[str] = deque(maxlen=4096)
+    recent_frame_hash_set: set[str] = set()
 
     while True:
         if not path.exists():
@@ -702,6 +710,14 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
                 if parsed is None:
                     continue
                 tensor, frame_metadata = parsed
+                frame_hash = csi_tensor_hash(tensor)
+                if frame_hash in recent_frame_hash_set:
+                    continue
+                if len(recent_frame_hashes) == recent_frame_hashes.maxlen:
+                    oldest_hash = recent_frame_hashes.popleft()
+                    recent_frame_hash_set.discard(oldest_hash)
+                recent_frame_hashes.append(frame_hash)
+                recent_frame_hash_set.add(frame_hash)
                 result = extractor.add_frame(tensor, frame_metadata)
                 if result is not None:
                     pending.append(result)
@@ -710,6 +726,9 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
             del frames
             if next_pos > pos:
                 pos = next_pos
+            else:
+                pos = chunk_end
+                print(f"[agent] advanced stream position to chunk_end={chunk_end} because next_pos did not move")
 
         if extractor.metadata is not None and base_payload is None:
             base_payload = {
