@@ -166,20 +166,48 @@ def load_csi_tensor_chunked(
 
 
 def clean_phase_per_link(csi_tensor: np.ndarray) -> np.ndarray:
-    phase = np.unwrap(np.angle(csi_tensor), axis=1).astype(np.float32)
-    num_tones = phase.shape[1]
-    x = np.arange(num_tones, dtype=np.float32)
-    design = np.column_stack([x, np.ones(num_tones, dtype=np.float32)])
+    """
+    4_10.ipynb と同様の一括最小二乗法による高速位相クリーニング。
+    """
+    # 形状を取得
+    if csi_tensor.ndim == 4:  # (num_frames, num_tones, num_tx, num_rx)
+        num_frames, num_tones, num_tx, num_rx = csi_tensor.shape
+        phase = np.angle(csi_tensor)
+        # サブキャリア軸(axis=1)でアンラップ
+        unwrapped_phase = np.unwrap(phase, axis=1)
+        # 行列計算用にフラット化 (num_frames * num_tx * num_rx, num_tones)
+        flat_phase = unwrapped_phase.transpose(0, 2, 3, 1).reshape(-1, num_tones)
+    else:  # ndim == 3 のケース (1フレーム処理時など)
+        num_tones, num_tx, num_rx = csi_tensor.shape
+        num_frames = 1
+        phase = np.angle(csi_tensor)
+        unwrapped_phase = np.unwrap(phase, axis=0)
+        flat_phase = unwrapped_phase.transpose(1, 2, 0).reshape(-1, num_tones)
 
-    flat = phase.reshape((-1, num_tones))
-    coefs, _, _, _ = np.linalg.lstsq(design, flat.T, rcond=None)
-    fitted = coefs[0, :, None] * x[None, :] + coefs[1, :, None]
-    cleaned = (flat - fitted).astype(np.float32)
-    return cleaned.reshape(phase.shape)
+    # 最小二乗法用の行列 A を準備
+    A = np.vstack([np.arange(num_tones), np.ones(num_tones)]).T
+
+    # 全チャンネル・全フレーム一括計算
+    coefs, _, _, _ = np.linalg.lstsq(A, flat_phase.T, rcond=None)
+    slopes = coefs[0, :]
+    intercepts = coefs[1, :]
+
+    # 直線成分の生成と減算
+    x_mesh = np.arange(num_tones)[np.newaxis, :]
+    fitted_lines = slopes[:, np.newaxis] * x_mesh + intercepts[:, np.newaxis]
+    cleaned_flat = flat_phase - fitted_lines
+
+    # 元のテンソル形状に復元
+    if csi_tensor.ndim == 4:
+        cleaned = cleaned_flat.reshape(num_frames, num_tx, num_rx, num_tones).transpose(0, 3, 1, 2)
+    else:
+        cleaned = cleaned_flat.reshape(num_tx, num_rx, num_tones).transpose(2, 0, 1)
+
+    return cleaned.astype(np.float32)
 
 
 def clean_phase_frame(csi_frame: np.ndarray) -> np.ndarray:
-    return clean_phase_per_link(csi_frame[np.newaxis, ...])[0]
+    return clean_phase_per_link(csi_frame)
 
 
 def robust_zscore_by_baseline(matrix: np.ndarray, baseline_rows: int, eps: float = 1e-9) -> np.ndarray:
@@ -211,29 +239,30 @@ def extract_features(
     baseline_seconds: float,
     smooth_seconds: float,
 ) -> tuple[np.ndarray, dict]:
+    """
+    4_10.ipynb の手法に基づき、振幅情報を排除して位相のPCA主成分変化量を抽出します。
+    """
+    # 1. 位相クリーニングと時間差分の計算 (axis=0: 時間軸方向)
     cleaned_phase = clean_phase_per_link(csi_tensor)
     phase_diff = np.diff(cleaned_phase, axis=0)
     feature_rows = phase_diff.shape[0]
 
+    # ベースライン行数の決定
     baseline_rows = int(round(baseline_seconds * sampling_rate_hz))
     baseline_rows = max(20, min(baseline_rows, max(20, feature_rows // 4)))
 
+    # 2次元行列への変形 (num_frames - 1, num_tones * num_tx * num_rx)
     phase_features = phase_diff.reshape((feature_rows, -1))
-    phase_z = robust_zscore_by_baseline(phase_features, baseline_rows)
-    pc1_phase, pc1_ratio = first_principal_component(phase_z)
-    pc1_z = robust_zscore_by_baseline(pc1_phase.reshape(-1, 1), baseline_rows).ravel()
+    
+    # 2. PCAの適用 (ノートブックのロジックに追従)
+    pc1_phase, pc1_ratio = first_principal_component(phase_features)
 
-    amplitude = np.log(np.abs(csi_tensor) + 1e-9).astype(np.float32)
-    amplitude_baseline = np.median(amplitude[: baseline_rows + 1], axis=0, keepdims=True)
-    amplitude_delta = amplitude[1:] - amplitude_baseline
-    amplitude_z_flat = robust_zscore_by_baseline(
-        amplitude_delta.reshape((feature_rows, -1)), baseline_rows
-    )
+    # 3. 既存エージェントの出力形式（motionScore, activeFlag等）との互換性を保つための擬似マッピング
+    # 振幅由来のノイズを完全に除外するため、位相のPC1信号強度をベースにスコア化します
+    phase_energy = np.sqrt(np.mean(phase_features**2, axis=1)).astype(np.float32)
+    amplitude_energy = np.zeros(feature_rows, dtype=np.float32)  # 振幅ノイズを排除するため0で固定
 
-    phase_energy = np.sqrt(np.mean(phase_z**2, axis=1)).astype(np.float32)
-    amplitude_energy = np.sqrt(np.mean(amplitude_z_flat**2, axis=1)).astype(np.float32)
-
-    raw_motion_score = np.sqrt(phase_energy**2 + amplitude_energy**2 + np.abs(pc1_z))
+    raw_motion_score = np.abs(pc1_phase)
     smooth_window = max(1, int(round(smooth_seconds * sampling_rate_hz)))
     motion_score = moving_average(raw_motion_score, smooth_window)
 
@@ -323,29 +352,15 @@ class StreamingFeatureExtractor:
 
     def _finalize_baseline(self) -> None:
         phase_baseline = np.asarray(self.baseline_phase_diffs, dtype=np.float32)
-        amplitude_baseline_frames = np.asarray(self.baseline_amplitudes, dtype=np.float32)
-        self.amplitude_baseline = np.median(amplitude_baseline_frames, axis=0, keepdims=True)
-
-        amplitude_delta_baseline = amplitude_baseline_frames[1:] - self.amplitude_baseline
-        amplitude_delta_flat = amplitude_delta_baseline.reshape((amplitude_delta_baseline.shape[0], -1))
-
+        
         self.phase_center = np.median(phase_baseline, axis=0, keepdims=True)
         self.phase_scale = (
             1.4826 * np.median(np.abs(phase_baseline - self.phase_center), axis=0, keepdims=True)
             + 1e-9
         )
-        self.amplitude_center = np.median(amplitude_delta_flat, axis=0, keepdims=True)
-        self.amplitude_scale = (
-            1.4826
-            * np.median(np.abs(amplitude_delta_flat - self.amplitude_center), axis=0, keepdims=True)
-            + 1e-9
-        )
 
         phase_z = (phase_baseline - self.phase_center) / self.phase_scale
-        amplitude_z = (amplitude_delta_flat - self.amplitude_center) / self.amplitude_scale
-        phase_energy = np.sqrt(np.mean(phase_z**2, axis=1))
-        amplitude_energy = np.sqrt(np.mean(amplitude_z**2, axis=1))
-        baseline_scores = np.sqrt(phase_energy**2 + amplitude_energy**2)
+        baseline_scores = np.abs(np.mean(phase_z, axis=1))  # PC1を模した平均位相変化量
         center = float(np.median(baseline_scores))
         mad = float(np.median(np.abs(baseline_scores - center)))
         self.motion_threshold = center + 4.0 * 1.4826 * mad
@@ -367,11 +382,6 @@ class StreamingFeatureExtractor:
 
         frame = csi_frame[self.selected_indices, :, :]
         phase = clean_phase_frame(frame)
-        amplitude = np.log(np.abs(frame) + 1e-9).astype(np.float32)
-
-        self.baseline_amplitudes.append(amplitude)
-        if len(self.baseline_amplitudes) > self.baseline_rows + 1:
-            self.baseline_amplitudes = self.baseline_amplitudes[-(self.baseline_rows + 1) :]
 
         if self.previous_phase is None:
             self.previous_phase = phase
@@ -392,19 +402,14 @@ class StreamingFeatureExtractor:
 
         assert self.phase_center is not None
         assert self.phase_scale is not None
-        assert self.amplitude_baseline is not None
-        assert self.amplitude_center is not None
-        assert self.amplitude_scale is not None
         assert self.motion_threshold is not None
 
-        amplitude_delta = (amplitude - self.amplitude_baseline[0]).reshape(1, -1)
         phase_z = (phase_diff - self.phase_center) / self.phase_scale
-        amplitude_z = (amplitude_delta - self.amplitude_center) / self.amplitude_scale
 
         phase_energy = float(np.sqrt(np.mean(phase_z**2)))
-        amplitude_energy = float(np.sqrt(np.mean(amplitude_z**2)))
+        amplitude_energy = 0.0  # 振幅を排除
         pc1_phase_diff = float(np.mean(phase_z))
-        raw_motion_score = float(np.sqrt(phase_energy**2 + amplitude_energy**2))
+        raw_motion_score = float(np.abs(pc1_phase_diff))
 
         self.previous_motion_scores.append(raw_motion_score)
         if len(self.previous_motion_scores) > self.smooth_window:
