@@ -79,6 +79,7 @@ if [ "${FOLLOW_GROWING_FILES}" = "true" ]; then
     --follow-growing-files
     --follow-lag-bytes "${FOLLOW_LAG_BYTES}"
     --stream-read-mb "${STREAM_READ_MB}"
+    --stream-parser-limit-gb "${STREAM_PARSER_LIMIT_GB}"
     --stream-post-interval "${STREAM_POST_INTERVAL}"
     --inactive-file-timeout-seconds "${INACTIVE_FILE_TIMEOUT_SECONDS}"
   )

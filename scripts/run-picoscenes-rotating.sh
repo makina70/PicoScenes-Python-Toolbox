@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CSI_DIR="${CSI_DIR:-data/csi}"
-MAX_ACTIVE_CSI_FILE_GB="${MAX_ACTIVE_CSI_FILE_GB:-5}"
+MAX_ACTIVE_CSI_FILE_GB="${MAX_ACTIVE_CSI_FILE_GB:-1.75}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-5}"
 PICOSCENES_COMMAND="${PICOSCENES_COMMAND:-PicoScenes \"-d debug -i 2 --mode logger --plot\"}"
 

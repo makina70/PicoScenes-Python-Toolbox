@@ -48,6 +48,7 @@ sudo env \
   RUN_PICOSCENES=false \
   FOLLOW_GROWING_FILES=true \
   STREAM_READ_MB=32 \
+  STREAM_PARSER_LIMIT_GB=1.75 \
   MAX_CSI_DIR_GB=5 \
   API_URL=http://<ML_API_HOST>:8001/csi \
   docker compose -f docker-compose.gmktec.yml up -d --build
@@ -60,9 +61,11 @@ The container watches `data/csi` and posts feature batches to the ML API.
 Use the host-side wrapper instead of running `PicoScenes` directly.  It starts
 PicoScenes from `data/csi`, monitors the active `.csi` file, and restarts
 PicoScenes after deleting the active file when it exceeds the configured size.
+Keep the limit below 2GB; long-running streams can otherwise hit invalid parser
+offsets and stop producing usable CSI frames.
 
 ```bash
-MAX_ACTIVE_CSI_FILE_GB=5 \
+MAX_ACTIVE_CSI_FILE_GB=1.75 \
 scripts/run-picoscenes-rotating.sh
 ```
 
@@ -76,7 +79,7 @@ Override it when needed:
 
 ```bash
 PICOSCENES_COMMAND='PicoScenes "-d debug -i 2 --mode logger --plot"' \
-MAX_ACTIVE_CSI_FILE_GB=5 \
+MAX_ACTIVE_CSI_FILE_GB=1.75 \
 scripts/run-picoscenes-rotating.sh
 ```
 

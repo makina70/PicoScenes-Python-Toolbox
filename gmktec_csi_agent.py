@@ -32,6 +32,9 @@ import numpy as np
 from picoscenes import Picoscenes
 
 
+DEFAULT_STREAM_PARSER_LIMIT_GB = 1.75
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -710,6 +713,24 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
     last_size = path.stat().st_size if path.exists() else 0
     last_growth = time.monotonic()
 
+    def flush_pending() -> None:
+        nonlocal last_post, last_sent_hash
+        if not pending or base_payload is None:
+            return
+        batch_start, batch_features = features_to_payload(pending, args.sampling_rate)
+        current_hash = feature_series_hash(batch_features, args.legacy_series)
+        if current_hash == last_sent_hash:
+            print(
+                "[agent] skipped duplicate batch "
+                f"start={batch_start} legacySeries={args.legacy_series} "
+                f"sha1={current_hash[:12]}"
+            )
+        else:
+            send_feature_payload(args, base_payload, batch_start, batch_features)
+            last_sent_hash = current_hash
+        pending.clear()
+        last_post = time.monotonic()
+
     while True:
         if not path.exists():
             print(f"[agent] followed file disappeared: {path}")
@@ -728,6 +749,7 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
                 f"path={path} size={size} "
                 f"timeout={args.inactive_file_timeout_seconds}s"
             )
+            flush_pending()
             return "done"
 
         max_active_bytes = int(args.max_active_csi_file_gb * 1024 * 1024 * 1024)
@@ -737,6 +759,17 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
                 f"path={path} size={size / (1024 * 1024 * 1024):.2f}GiB "
                 f"limit={args.max_active_csi_file_gb:.2f}GiB"
             )
+            flush_pending()
+            return "rotate"
+
+        parser_limit_bytes = int(args.stream_parser_limit_gb * 1024 * 1024 * 1024)
+        if parser_limit_bytes > 0 and args.picoscenes_command and size >= parser_limit_bytes:
+            print(
+                "[agent] active CSI file reached stream parser limit "
+                f"path={path} size={size / (1024 * 1024 * 1024):.2f}GiB "
+                f"limit={args.stream_parser_limit_gb:.2f}GiB"
+            )
+            flush_pending()
             return "rotate"
 
         readable_end = size - args.follow_lag_bytes
@@ -799,6 +832,14 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
                     f"next_pos={next_pos} readableEnd={readable_end} "
                     f"chunkStart={chunk_start} chunkEnd={chunk_end}"
                 )
+            elif next_pos < 0:
+                print(
+                    "[agent] stream parser returned negative next_pos; rotating active CSI file "
+                    f"next_pos={next_pos} pos={pos} chunkStart={chunk_start} "
+                    f"chunkEnd={chunk_end} size={size}"
+                )
+                flush_pending()
+                return "rotate" if args.picoscenes_command else "done"
             else:
                 pos = chunk_end
                 print(
@@ -852,19 +893,7 @@ def follow_growing_file(path: Path, args: argparse.Namespace, session_id: str) -
             or time.monotonic() - last_post >= args.stream_post_interval
         )
         if should_flush and base_payload is not None:
-            batch_start, batch_features = features_to_payload(pending, args.sampling_rate)
-            current_hash = feature_series_hash(batch_features, args.legacy_series)
-            if current_hash == last_sent_hash:
-                print(
-                    "[agent] skipped duplicate batch "
-                    f"start={batch_start} legacySeries={args.legacy_series} "
-                    f"sha1={current_hash[:12]}"
-                )
-            else:
-                send_feature_payload(args, base_payload, batch_start, batch_features)
-                last_sent_hash = current_hash
-            pending.clear()
-            last_post = time.monotonic()
+            flush_pending()
 
         if time.monotonic() - last_cleanup >= args.cleanup_interval:
             maybe_cleanup(path.parent, {path.resolve()}, args)
@@ -1006,11 +1035,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--follow-lag-bytes", type=int, default=1024 * 1024)
     parser.add_argument("--stream-start-at-end", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--stream-read-mb", type=int, default=32)
+    parser.add_argument(
+        "--stream-parser-limit-gb",
+        type=float,
+        default=DEFAULT_STREAM_PARSER_LIMIT_GB,
+        help=(
+            "Rotate live CSI files before the PicoScenes stream parser reaches large-file "
+            "offsets that can produce invalid next_pos values. Set <=0 to disable."
+        ),
+    )
     parser.add_argument("--stream-post-interval", type=float, default=1.0)
     parser.add_argument("--inactive-file-timeout-seconds", type=float, default=60.0)
     parser.add_argument("--cleanup-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-csi-dir-gb", type=float, default=20.0)
-    parser.add_argument("--max-active-csi-file-gb", type=float, default=10.0)
+    parser.add_argument("--max-active-csi-file-gb", type=float, default=DEFAULT_STREAM_PARSER_LIMIT_GB)
     parser.add_argument("--keep-latest-files", type=int, default=1)
     parser.add_argument("--cleanup-min-age-seconds", type=float, default=300.0)
     parser.add_argument("--cleanup-interval", type=float, default=60.0)
